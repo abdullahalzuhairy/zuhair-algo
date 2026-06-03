@@ -6,12 +6,17 @@ import warnings
 import datetime
 import numpy as np
 import pandas as pd
+import requests
 from flask import Flask, jsonify
 import yfinance as yf
 
 warnings.filterwarnings("ignore")
 app = Flask(__name__)
 
+# رابط كوكل شيت الخاص بك
+SHEETS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbykS5AgiAUziwJu798jKwcE3z1MItO-S9Z2XPq4cr_uGPX1QHepyVu-9MBraXYxRaM/exec"
+
+# --- مدير سجل الصفقات المؤقت (للعرض بالواجهة) ---
 HISTORY_FILE = 'trade_history.json'
 
 def load_history():
@@ -27,6 +32,22 @@ def save_history(history):
     with open(HISTORY_FILE, 'w') as f:
         json.dump(history, f)
 
+def log_to_google_sheets(asset, trade_type, entry, tp, sl, result="Open"):
+    try:
+        data = {
+            "time": str(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "asset": asset,
+            "type": trade_type,
+            "entry": round(entry, 5),
+            "tp": round(tp, 5),
+            "sl": round(sl, 5),
+            "result": result
+        }
+        # إرسال البيانات إلى كوكل شيت
+        requests.post(SHEETS_WEBHOOK_URL, json=data, timeout=5)
+    except Exception as e:
+        print(f"Sheets Error: {e}")
+
 def evaluate_active_trades(current_prices):
     history = load_history()
     still_active = []
@@ -39,19 +60,23 @@ def evaluate_active_trades(current_prices):
                 if curr_price >= trade['tp']:
                     history['won'] += 1
                     history['total_closed'] += 1
+                    log_to_google_sheets(symbol, "BUY", trade['entry'], trade['tp'], trade['sl'], "WON (TP)")
                     continue
                 elif curr_price <= trade['sl']:
                     history['lost'] += 1
                     history['total_closed'] += 1
+                    log_to_google_sheets(symbol, "BUY", trade['entry'], trade['tp'], trade['sl'], "LOST (SL)")
                     continue
             elif trade['type'] == 'SELL':
                 if curr_price <= trade['tp']:
                     history['won'] += 1
                     history['total_closed'] += 1
+                    log_to_google_sheets(symbol, "SELL", trade['entry'], trade['tp'], trade['sl'], "WON (TP)")
                     continue
                 elif curr_price >= trade['sl']:
                     history['lost'] += 1
                     history['total_closed'] += 1
+                    log_to_google_sheets(symbol, "SELL", trade['entry'], trade['tp'], trade['sl'], "LOST (SL)")
                     continue
         still_active.append(trade)
         
@@ -59,6 +84,7 @@ def evaluate_active_trades(current_prices):
     save_history(history)
     return history
 
+# --- HTML Frontend ---
 HTML_CONTENT = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -119,7 +145,7 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
   <div class="title">Zuhair <span>Ultimate</span> 24/5</div>
   <div class="sys-info">
     <div class="status-indicator" id="apiStatus"><div class="live-dot"></div> ENGINE ONLINE</div>
-    <div>REFRESH: <span id="countdown">60</span>s</div>
+    <div>REFRESH: <span id="countdown">60</span>s (Cached)</div>
     <div id="clock">--:--:-- UTC</div>
   </div>
 </div>
@@ -135,7 +161,7 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
         <div class="stat-box"><div class="stat-val" style="color:var(--gold)">0%</div><div class="stat-lbl">نسبة النجاح (Win Rate)</div></div>
       </div>
       <div style="margin-top: 15px; font-size: 12px; color: var(--text-muted); text-align: center;">
-        * تم تفعيل السحب المخفي للبيانات لتجاوز الحظر السحابي.
+        * تم الربط مع <strong>Google Sheets</strong>. الصفقات تُرسل للجدول تلقائياً.
       </div>
     </div>
   </div>
@@ -166,7 +192,7 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
         </tr>
       </thead>
       <tbody id="matrixBody">
-        <tr><td colspan="5" style="padding: 20px; text-align:center;">جاري جلب البيانات...</td></tr>
+        <tr><td colspan="5" style="padding: 20px; text-align:center;">جاري جلب البيانات بأمان...</td></tr>
       </tbody>
     </table>
   </div>
@@ -236,7 +262,7 @@ function renderMatrixAndSignals(assetsData) {
         signalsHtml += `
         <div class="signal-card ${cClass}">
           <div class="sig-header">
-            <div class="sig-asset">${a.name} <span class="strength-badge high">🔥 ${str}%</span></div>
+            <div class="sig-asset">${a.name} <span class="strength-badge high">🔥 ${str}% إشارة قوية</span></div>
             <span class="sig-type ${tClass}">${aText}</span>
           </div>
           <div class="sig-levels">
@@ -249,7 +275,7 @@ function renderMatrixAndSignals(assetsData) {
   });
 
   if (tableHtml === '') {
-      tableHtml = '<tr><td colspan="5" style="padding: 20px; color:var(--down);">السيرفر يجمع البيانات، يرجى الانتظار ثواني قليلة...</td></tr>';
+      tableHtml = '<tr><td colspan="5" style="padding: 20px; color:var(--down);">يتم الاتصال بسوق العملات، يرجى الانتظار...</td></tr>';
   }
 
   document.getElementById('matrixBody').innerHTML = tableHtml;
@@ -308,6 +334,12 @@ def get_data():
         'EURUSD': 'EURUSD=X', 'GBPUSD': 'GBPUSD=X', 'AUDUSD': 'AUDUSD=X',
         'USDJPY': 'JPY=X', 'XAUUSD': 'GC=F', 'BTCUSD': 'BTC-USD'
     }
+    
+    # جلسة اتصال وهمية لتجاوز الحظر
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
 
     assets_data = {}
     current_prices = {}
@@ -316,13 +348,11 @@ def get_data():
 
     for asset_id, symbol in tickers.items():
         try:
-            # الطريقة المخفية لسحب البيانات وتجاوز حظر ياهو
-            tkr = yf.Ticker(symbol)
-            df_daily = tkr.history(period="60d", interval="1d")
-            df_hourly = tkr.history(period="10d", interval="1h")
+            # استخدام جلسة الاتصال لجلب البيانات بأمان
+            df_daily = yf.download(symbol, period="60d", interval="1d", progress=False, session=session)
+            df_hourly = yf.download(symbol, period="10d", interval="1h", progress=False, session=session)
             
             if df_daily.empty or df_hourly.empty:
-                print(f"Warning: Empty data for {symbol}")
                 continue
                 
             d_daily = pd.DataFrame({'Close': df_daily['Close']}).dropna()
@@ -373,12 +403,14 @@ def get_data():
                     sl = curr_price + (atr * 1.5)
                     tp = curr_price - (atr * 3.0)
                 
+                # إضافة الصفقة وإرسالها لـ Google Sheets
                 if asset_id not in active_symbols:
                     history['active'].append({
                         'asset': asset_id, 'type': signal, 'entry': curr_price,
                         'sl': sl, 'tp': tp, 'time': str(datetime.datetime.now())
                     })
                     save_history(history)
+                    log_to_google_sheets(asset_id, signal, curr_price, tp, sl, "Open")
 
             assets_data[asset_id] = {
                 'price': curr_price,
@@ -388,10 +420,10 @@ def get_data():
                 'signal': signal, 'sl': sl, 'tp': tp
             }
         except Exception as e:
-            print(f"Error {asset_id}: {str(e)}")
             continue
 
     updated_history = evaluate_active_trades(current_prices)
+
     final_response = {"assets": assets_data, "history": updated_history}
     
     CACHE["data"] = final_response
