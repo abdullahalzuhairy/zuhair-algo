@@ -13,7 +13,7 @@ import yfinance as yf
 warnings.filterwarnings("ignore")
 app = Flask(__name__)
 
-# رابط كوكل شيت الخاص بك
+# رابط كوكل شيت الخاص بك اللي دزيته
 SHEETS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbykS5AgiAUziwJu798jKwcE3z1MItO-S9Z2XPq4cr_uGPX1QHepyVu-9MBraXYxRaM/exec"
 
 HISTORY_FILE = 'trade_history.json'
@@ -142,7 +142,7 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
   <div class="title">Zuhair <span>Ultimate</span> 24/5</div>
   <div class="sys-info">
     <div class="status-indicator" id="apiStatus"><div class="live-dot"></div> ENGINE ONLINE</div>
-    <div>REFRESH: <span id="countdown">60</span>s</div>
+    <div>REFRESH: <span id="countdown">60</span>s (Cached)</div>
     <div id="clock">--:--:-- UTC</div>
   </div>
 </div>
@@ -158,7 +158,7 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
         <div class="stat-box"><div class="stat-val" style="color:var(--gold)">0%</div><div class="stat-lbl">نسبة النجاح (Win Rate)</div></div>
       </div>
       <div style="margin-top: 15px; font-size: 12px; color: var(--text-muted); text-align: center;">
-        * تم الربط مع <strong>Google Sheets</strong>. يتم عرض الأخطاء المباشرة لتشخيص الحظر السحابي.
+        * تم الربط مع <strong>Google Sheets</strong> بنجاح.
       </div>
     </div>
   </div>
@@ -239,11 +239,10 @@ function renderMatrixAndSignals(assetsData) {
     let d = assetsData[a.id];
     if(!d) return;
     
-    // إذا كان هناك خطأ في السحب من ياهو، نطبعه في الجدول
     if(d.error) {
         tableHtml += `<tr>
             <td style="font-weight:bold; color:#fff;">${a.name}</td>
-            <td colspan="4" style="color:var(--down); text-align:right; font-size:11px;">⚠️ خطأ: ${d.error}</td>
+            <td colspan="4" style="color:var(--down); text-align:right; font-size:11px;">⚠️ ${d.error}</td>
         </tr>`;
         return;
     }
@@ -341,6 +340,11 @@ def get_data():
         'USDJPY': 'JPY=X', 'XAUUSD': 'GC=F', 'BTCUSD': 'BTC-USD'
     }
 
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+
     assets_data = {}
     current_prices = {}
     history = load_history()
@@ -348,17 +352,23 @@ def get_data():
 
     for asset_id, symbol in tickers.items():
         try:
-            # محاولة سحب البيانات بشكل فردي
-            df_daily = yf.download(symbol, period="60d", interval="1d", progress=False)
-            df_hourly = yf.download(symbol, period="10d", interval="1h", progress=False)
+            # هنا التغيير الجذري: نستخدم دالة history بدل download لتجنب مشكلة المصفوفة المعقدة
+            tkr = yf.Ticker(symbol, session=session)
+            df_daily = tkr.history(period="60d", interval="1d")
+            df_hourly = tkr.history(period="10d", interval="1h")
             
             if df_daily.empty or df_hourly.empty:
                 assets_data[asset_id] = {"error": "تم حظر السحب أو البيانات فارغة من المصدر."}
                 continue
                 
-            d_daily = pd.DataFrame({'Close': df_daily['Close']}).dropna()
-            d_hourly = pd.DataFrame({'High': df_hourly['High'], 'Low': df_hourly['Low'], 'Close': df_hourly['Close']}).dropna()
+            # نستخرج الأعمدة ببساطة وبدون أخطاء
+            d_daily = df_daily[['Close']].dropna()
+            d_hourly = df_hourly[['High', 'Low', 'Close']].dropna()
             
+            if d_daily.empty or d_hourly.empty:
+                assets_data[asset_id] = {"error": "بيانات غير مكتملة."}
+                continue
+
             curr_price = float(d_hourly['Close'].iloc[-1])
             current_prices[asset_id] = curr_price
             
@@ -404,7 +414,6 @@ def get_data():
                     sl = curr_price + (atr * 1.5)
                     tp = curr_price - (atr * 3.0)
                 
-                # إضافة الصفقة وإرسالها لـ Google Sheets
                 if asset_id not in active_symbols:
                     history['active'].append({
                         'asset': asset_id, 'type': signal, 'entry': curr_price,
@@ -421,7 +430,6 @@ def get_data():
                 'signal': signal, 'sl': sl, 'tp': tp
             }
         except Exception as e:
-            # حفظ الخطأ لعرضه في واجهة الموقع بدلاً من إخفائه
             assets_data[asset_id] = {"error": str(e)}
             continue
 
