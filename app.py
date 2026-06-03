@@ -6,6 +6,7 @@ import warnings
 import datetime
 import numpy as np
 import pandas as pd
+import requests
 from flask import Flask, jsonify
 import yfinance as yf
 
@@ -143,7 +144,7 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
   <div class="title">Zuhair <span>Ultimate</span> 24/5</div>
   <div class="sys-info">
     <div class="status-indicator" id="apiStatus"><div class="live-dot"></div> ENGINE ONLINE</div>
-    <div>REFRESH: <span id="countdown">60</span>s</div>
+    <div>REFRESH: <span id="countdown">60</span>s (Cached)</div>
     <div id="clock">--:--:-- UTC</div>
   </div>
 </div>
@@ -154,12 +155,13 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
     <div class="panel-body">
       <div class="stats-grid" id="statsGrid">
         <div class="stat-box"><div class="stat-val">0</div><div class="stat-lbl">إجمالي الصفقات</div></div>
-        <div class="stat-box"><div class="stat-val" style="color:var(--up)">0</div><div class="stat-lbl">الرابحة (TP Hit)</div></div>
-        <div class="stat-box"><div class="stat-val" style="color:var(--down)">0</div><div class="stat-lbl">الخاسرة (SL Hit)</div></div>
+        <div class="stat-box"><div class="stat-val" style="color:var(--up)">0</div><div class="stat-lbl">أهداف متحققة (TP)</div></div>
+        <div class="stat-box"><div class="stat-val" style="color:var(--down)">0</div><div class="stat-lbl">ضرب ستوب (SL)</div></div>
         <div class="stat-box"><div class="stat-val" style="color:var(--gold)">0%</div><div class="stat-lbl">نسبة النجاح (Win Rate)</div></div>
       </div>
       <div style="margin-top: 15px; font-size: 12px; color: var(--text-muted); text-align: center;">
-        * يتم مراقبة الصفقات المفتوحة التي حققت قوة إشارة 80% فما فوق وتسجيل نتائجها تلقائياً.
+        * يتم مراقبة الصفقات المفتوحة التي حققت قوة إشارة 80% فما فوق وتسجيل نتائجها تلقائياً. 
+        <br><span style="color:var(--poi)">تم تفعيل وضع مضاد الحظر وتوفير الـ CPU لضمان استقرار السيرفر.</span>
       </div>
     </div>
   </div>
@@ -190,7 +192,7 @@ tr:hover { background-color: rgba(255,255,255,0.03); }
         </tr>
       </thead>
       <tbody id="matrixBody">
-        <tr><td colspan="5" style="padding: 20px; text-align:center;">جاري المعالجة...</td></tr>
+        <tr><td colspan="5" style="padding: 20px; text-align:center;">جاري جلب البيانات بأمان...</td></tr>
       </tbody>
     </table>
   </div>
@@ -210,6 +212,9 @@ async function fetchSystemData() {
   try {
     const response = await fetch('/api/data');
     const data = await response.json();
+    if(data.error) {
+        console.error("Backend Error:", data.error);
+    }
     renderStats(data.history);
     renderMatrixAndSignals(data.assets);
   } catch (error) { console.error("Error:", error); }
@@ -252,7 +257,6 @@ function renderMatrixAndSignals(assetsData) {
       <td class="${getCls(d.signal)}">${d.signal}</td>
     </tr>`;
 
-    // Only show cards for signals >= 80%
     if (str >= 80 && d.signal !== 'WAIT') {
         let cClass = d.signal === 'BUY' ? 'buy' : 'sell';
         let tClass = d.signal === 'BUY' ? 'type-buy' : 'type-sell';
@@ -272,6 +276,10 @@ function renderMatrixAndSignals(assetsData) {
         </div>`;
     }
   });
+
+  if (tableHtml === '') {
+      tableHtml = '<tr><td colspan="5" style="padding: 20px; color:var(--down);">يوجد تأخير في سحب البيانات من السوق، جاري المحاولة...</td></tr>';
+  }
 
   document.getElementById('matrixBody').innerHTML = tableHtml;
   if(signalsHtml === '') {
@@ -315,15 +323,31 @@ def calculate_adx_proxy(df, period=14):
     adx_proxy = (price_change / (tr * period)) * 100
     return adx_proxy.rolling(7).mean().fillna(20)
 
+
+# --- CPU SAVING CACHE SYSTEM ---
+CACHE = {
+    "data": None,
+    "timestamp": 0
+}
+CACHE_DURATION = 180  # 3 Minutes cache
+
 @app.route('/api/data')
 def get_data():
+    current_time = time.time()
+    
+    if CACHE["data"] is not None and (current_time - CACHE["timestamp"] < CACHE_DURATION):
+        return jsonify(CACHE["data"])
+
     tickers = {
         'EURUSD': 'EURUSD=X', 'GBPUSD': 'GBPUSD=X', 'AUDUSD': 'AUDUSD=X',
         'USDJPY': 'JPY=X', 'XAUUSD': 'GC=F', 'BTCUSD': 'BTC-USD'
     }
     
-    df_daily = yf.download(list(tickers.values()), period="60d", interval="1d", progress=False)
-    df_hourly = yf.download(list(tickers.values()), period="10d", interval="1h", progress=False)
+    # --- Anti-Ban Session (Tricks Yahoo Finance into thinking this is a real browser) ---
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
 
     assets_data = {}
     current_prices = {}
@@ -332,8 +356,16 @@ def get_data():
 
     for asset_id, symbol in tickers.items():
         try:
-            d_daily = pd.DataFrame({'Close': df_daily['Close'][symbol]}).dropna()
-            d_hourly = pd.DataFrame({'High': df_hourly['High'][symbol], 'Low': df_hourly['Low'][symbol], 'Close': df_hourly['Close'][symbol]}).dropna()
+            # Download each ticker individually to prevent multi-index parsing errors
+            df_daily = yf.download(symbol, period="60d", interval="1d", progress=False, session=session)
+            df_hourly = yf.download(symbol, period="10d", interval="1h", progress=False, session=session)
+            
+            if df_daily.empty or df_hourly.empty:
+                print(f"Warning: No data received for {symbol}")
+                continue
+                
+            d_daily = pd.DataFrame({'Close': df_daily['Close']}).dropna()
+            d_hourly = pd.DataFrame({'High': df_hourly['High'], 'Low': df_hourly['Low'], 'Close': df_hourly['Close']}).dropna()
             
             curr_price = float(d_hourly['Close'].iloc[-1])
             current_prices[asset_id] = curr_price
@@ -383,7 +415,6 @@ def get_data():
                     sl = curr_price + (atr * 1.5)
                     tp = curr_price - (atr * 3.0)
                 
-                # Add to Trade Logger if not already active
                 if asset_id not in active_symbols:
                     history['active'].append({
                         'asset': asset_id, 'type': signal, 'entry': curr_price,
@@ -399,13 +430,17 @@ def get_data():
                 'signal': signal, 'sl': sl, 'tp': tp
             }
         except Exception as e:
+            print(f"Error processing {asset_id}: {str(e)}")
             continue
 
-    # Evaluate ongoing trades
     updated_history = evaluate_active_trades(current_prices)
 
-    return jsonify({"assets": assets_data, "history": updated_history})
+    final_response = {"assets": assets_data, "history": updated_history}
+    
+    CACHE["data"] = final_response
+    CACHE["timestamp"] = current_time
+
+    return jsonify(final_response)
 
 if __name__ == '__main__':
-    # This block is only used when running locally. PythonAnywhere ignores it.
     app.run(port=8080, debug=False, use_reloader=False)
