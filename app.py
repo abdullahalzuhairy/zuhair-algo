@@ -8,7 +8,6 @@ import pandas as pd
 import requests
 from flask import Flask, jsonify
 
-# استيراد yfinance وتجاهل التحذيرات
 warnings.filterwarnings("ignore")
 import yfinance as yf
 
@@ -27,7 +26,6 @@ ASSETS = {
     'BTC-USD':  {'name': 'BTC/USD', 'dec': 2}
 }
 
-# --- نظام الذاكرة المؤقتة لتقليل الضغط وتجاوز الحظر ---
 CACHE = {"data": None, "timestamp": 0}
 CACHE_DURATION = 300  # 5 دقائق
 
@@ -85,14 +83,12 @@ def calculate_adx_proxy(df, period=14):
 def get_data():
     current_time = time.time()
     
-    # إرجاع البيانات من الذاكرة إذا لم تمر 5 دقائق
     if CACHE["data"] and (current_time - CACHE["timestamp"] < CACHE_DURATION):
         return jsonify(CACHE["data"])
 
-    # جلسة اتصال وهمية
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     })
 
     history = load_history()
@@ -100,29 +96,37 @@ def get_data():
     assets_data = {}
     current_prices = {}
 
+    # السحب المجمع (Bulk Download) - طلبتين فقط بدلاً من 12 لتجنب الحظر
+    tickers_str = " ".join(ASSETS.keys())
+    
+    try:
+        df_daily_all = yf.download(tickers_str, period="60d", interval="1d", progress=False, session=session)
+        df_hourly_all = yf.download(tickers_str, period="10d", interval="1h", progress=False, session=session)
+    except Exception as e:
+        return jsonify({"assets": {info['name']: {"error": "جارِ تجاوز حظر ياهو، سيتم التحديث قريباً..."} for info in ASSETS.values()}, "history": history})
+
+    if df_daily_all.empty or df_hourly_all.empty:
+        return jsonify({"assets": {info['name']: {"error": "تم تقييد الطلبات (Rate Limit)، يرجى الانتظار بضع دقائق ليبرد السيرفر."} for info in ASSETS.values()}, "history": history})
+
     for symbol, info in ASSETS.items():
         asset_name = info['name']
         try:
-            # السحب التسلسلي الآمن
-            tkr = yf.Ticker(symbol, session=session)
-            df_daily = tkr.history(period="60d", interval="1d")
-            df_hourly = tkr.history(period="10d", interval="1h")
-            
-            if df_daily.empty or df_hourly.empty:
-                assets_data[asset_name] = {"error": "تم حظر الطلب من المصدر (Rate Limit). يرجى الانتظار."}
+            # استخراج بيانات كل عملة من الحزمة المجمعة
+            close_d = df_daily_all['Close'][symbol].dropna()
+            high_h = df_hourly_all['High'][symbol].dropna()
+            low_h = df_hourly_all['Low'][symbol].dropna()
+            close_h = df_hourly_all['Close'][symbol].dropna()
+
+            if close_d.empty or close_h.empty:
+                assets_data[asset_name] = {"error": "بيانات غير مكتملة في الوقت الحالي."}
                 continue
-                
-            d_daily = df_daily[['Close']].dropna()
-            d_hourly = df_hourly[['High', 'Low', 'Close']].dropna()
-            
-            if d_daily.empty or d_hourly.empty:
-                assets_data[asset_name] = {"error": "بيانات غير مكتملة."}
-                continue
+
+            d_daily = pd.DataFrame({'Close': close_d})
+            d_hourly = pd.DataFrame({'High': high_h, 'Low': low_h, 'Close': close_h})
 
             curr_price = float(d_hourly['Close'].iloc[-1])
             current_prices[asset_name] = curr_price
             
-            # حساب الاتجاه (بناءً على طلبك بالتركيز على الاتجاه + POI)
             w1_trend = 'UP' if curr_price > d_daily['Close'].rolling(50).mean().iloc[-1] else 'DOWN'
             d1_trend = 'UP' if curr_price > d_daily['Close'].rolling(20).mean().iloc[-1] else 'DOWN'
             h4_trend = 'UP' if curr_price > d_hourly['Close'].rolling(50).mean().iloc[-1] else 'DOWN'
@@ -138,14 +142,13 @@ def get_data():
                 fib_50 = recent_48h['High'].max() - (diff * 0.500)
                 fib_618 = recent_48h['High'].max() - (diff * 0.618)
                 in_poi = (curr_price <= fib_50) and (curr_price >= fib_618)
-                rsi_ok = rsi_val < 55 # تخفيف الشرط قليلاً لزيادة الفرص
+                rsi_ok = rsi_val < 55 
             else:
                 fib_50 = recent_48h['Low'].min() + (diff * 0.500)
                 fib_618 = recent_48h['Low'].min() + (diff * 0.618)
                 in_poi = (curr_price >= fib_50) and (curr_price <= fib_618)
                 rsi_ok = rsi_val > 45
 
-            # قوة الإشارة
             strength = 0
             if d1_trend == h4_trend: strength += 30
             if h4_trend == m30_trend: strength += 20
@@ -162,7 +165,6 @@ def get_data():
                 sl = curr_price - (atr * 1.5) if signal == 'BUY' else curr_price + (atr * 1.5)
                 tp = curr_price + (atr * 3.0) if signal == 'BUY' else curr_price - (atr * 3.0)
                 
-                # تسجيل الصفقة الجديدة
                 if asset_name not in active_symbols:
                     history['active'].append({
                         'asset': asset_name, 'type': signal, 'entry': curr_price,
@@ -181,10 +183,9 @@ def get_data():
             }
             
         except Exception as e:
-            assets_data[asset_name] = {"error": f"خطأ مؤقت: {str(e)[:40]}..."}
+            assets_data[asset_name] = {"error": f"معالجة البيانات: {str(e)[:30]}"}
             continue
 
-    # تقييم الصفقات المفتوحة
     still_active = []
     for trade in history['active']:
         symbol = trade['asset']
@@ -331,7 +332,7 @@ tr:hover { background: rgba(255,255,255,0.02); }
         </tr>
       </thead>
       <tbody id="matrixBody">
-        <tr><td colspan="6" class="loading-screen">⏳ يتم سحب البيانات الآمنة... يرجى الانتظار بضع ثوانٍ.</td></tr>
+        <tr><td colspan="6" class="loading-screen">⏳ يتم سحب البيانات بحزمة واحدة... يرجى الانتظار.</td></tr>
       </tbody>
     </table>
   </div>
@@ -347,48 +348,52 @@ async function loadData() {
         const res = await fetch('/api/data');
         const data = await res.json();
         
-        document.getElementById('lastUpdate').innerText = "Last Scan: " + data.last_update;
+        document.getElementById('lastUpdate').innerText = "Last Scan: " + (data.last_update || "--");
 
-        let hist = data.history;
-        let wr = hist.total_closed > 0 ? ((hist.won / hist.total_closed) * 100).toFixed(1) : 0;
-        document.getElementById('statsGrid').innerHTML = `
-            <div class="stat-item"><div class="stat-val">${hist.total_closed}</div><div class="stat-lbl">إجمالي الصفقات</div></div>
-            <div class="stat-item"><div class="stat-val" style="color:var(--up)">${hist.won}</div><div class="stat-lbl">أهداف (TP)</div></div>
-            <div class="stat-item"><div class="stat-val" style="color:var(--down)">${hist.lost}</div><div class="stat-lbl">خسائر (SL)</div></div>
-            <div class="stat-item"><div class="stat-val" style="color:var(--gold)">${wr}%</div><div class="stat-lbl">Win Rate</div></div>
-        `;
+        if(data.history) {
+            let hist = data.history;
+            let wr = hist.total_closed > 0 ? ((hist.won / hist.total_closed) * 100).toFixed(1) : 0;
+            document.getElementById('statsGrid').innerHTML = `
+                <div class="stat-item"><div class="stat-val">${hist.total_closed}</div><div class="stat-lbl">إجمالي الصفقات</div></div>
+                <div class="stat-item"><div class="stat-val" style="color:var(--up)">${hist.won}</div><div class="stat-lbl">أهداف (TP)</div></div>
+                <div class="stat-item"><div class="stat-val" style="color:var(--down)">${hist.lost}</div><div class="stat-lbl">خسائر (SL)</div></div>
+                <div class="stat-item"><div class="stat-val" style="color:var(--gold)">${wr}%</div><div class="stat-lbl">Win Rate</div></div>
+            `;
+        }
 
         let html = '';
-        for (const [id, d] of Object.entries(data.assets)) {
-            if(d.error) {
-                html += `<tr><td class="asset-name">${id}</td><td colspan="5" style="color:var(--down); font-size:12px; font-weight:bold;">⚠️ ${d.error}</td></tr>`;
-                continue;
-            }
-            
-            let arr_d1 = d.htf_trend.D1 === 'UP' ? '<span class="txt-up trend-arrow">↑</span>' : '<span class="txt-down trend-arrow">↓</span>';
-            let arr_h4 = d.htf_trend.H4 === 'UP' ? '<span class="txt-up trend-arrow">↑</span>' : '<span class="txt-down trend-arrow">↓</span>';
-            
-            let strColor = d.strength >= 80 ? 'var(--up)' : (d.strength >= 50 ? 'var(--gold)' : 'var(--text-muted)');
-            
-            let badgeCls = d.signal === 'BUY' ? 'badge-buy' : (d.signal === 'SELL' ? 'badge-sell' : 'badge-wait');
-            let sigText = d.signal === 'WAIT' ? 'WAIT' : `${d.signal} <br><span style="font-size:10px;">${d.price.toFixed(d.dec)}</span>`;
+        if(data.assets) {
+            for (const [id, d] of Object.entries(data.assets)) {
+                if(d.error) {
+                    html += `<tr><td class="asset-name">${id}</td><td colspan="5" style="color:var(--gold); font-size:12px; font-weight:bold;">⚠️ ${d.error}</td></tr>`;
+                    continue;
+                }
+                
+                let arr_d1 = d.htf_trend.D1 === 'UP' ? '<span class="txt-up trend-arrow">↑</span>' : '<span class="txt-down trend-arrow">↓</span>';
+                let arr_h4 = d.htf_trend.H4 === 'UP' ? '<span class="txt-up trend-arrow">↑</span>' : '<span class="txt-down trend-arrow">↓</span>';
+                
+                let strColor = d.strength >= 80 ? 'var(--up)' : (d.strength >= 50 ? 'var(--gold)' : 'var(--text-muted)');
+                
+                let badgeCls = d.signal === 'BUY' ? 'badge-buy' : (d.signal === 'SELL' ? 'badge-sell' : 'badge-wait');
+                let sigText = d.signal === 'WAIT' ? 'WAIT' : `${d.signal} <br><span style="font-size:10px;">${d.price.toFixed(d.dec)}</span>`;
 
-            html += `<tr>
-                <td><div class="asset-name">${d.name}</div><div class="price">${d.price.toFixed(d.dec)}</div></td>
-                <td><div style="font-size:14px; letter-spacing:5px;">${arr_d1} ${arr_h4}</div></td>
-                <td style="font-family:var(--font-mono); font-size:12px; color:var(--text-muted);">ADX: ${d.adx.toFixed(0)} <br> RSI: ${d.rsi.toFixed(0)}</td>
-                <td style="color:var(--gold); font-family:var(--font-mono); font-size:12px;">${d.poi.fib_618.toFixed(d.dec)}<br>${d.poi.fib_50.toFixed(d.dec)}</td>
-                <td>
-                    <div style="color:${strColor}; font-weight:bold; font-family:var(--font-mono);">${d.strength}%</div>
-                    <div class="progress-bg"><div class="progress-fg" style="width:${d.strength}%; background:${strColor};"></div></div>
-                </td>
-                <td><div class="badge ${badgeCls}">${sigText}</div></td>
-            </tr>`;
+                html += `<tr>
+                    <td><div class="asset-name">${d.name}</div><div class="price">${d.price.toFixed(d.dec)}</div></td>
+                    <td><div style="font-size:14px; letter-spacing:5px;">${arr_d1} ${arr_h4}</div></td>
+                    <td style="font-family:var(--font-mono); font-size:12px; color:var(--text-muted);">ADX: ${d.adx.toFixed(0)} <br> RSI: ${d.rsi.toFixed(0)}</td>
+                    <td style="color:var(--gold); font-family:var(--font-mono); font-size:12px;">${d.poi.fib_618.toFixed(d.dec)}<br>${d.poi.fib_50.toFixed(d.dec)}</td>
+                    <td>
+                        <div style="color:${strColor}; font-weight:bold; font-family:var(--font-mono);">${d.strength}%</div>
+                        <div class="progress-bg"><div class="progress-fg" style="width:${d.strength}%; background:${strColor};"></div></div>
+                    </td>
+                    <td><div class="badge ${badgeCls}">${sigText}</div></td>
+                </tr>`;
+            }
         }
         document.getElementById('matrixBody').innerHTML = html;
 
     } catch (e) {
-        document.getElementById('matrixBody').innerHTML = `<tr><td colspan="6" style="color:var(--down);">فشل الاتصال بالسيرفر. يرجى المحاولة مرة أخرى.</td></tr>`;
+        document.getElementById('matrixBody').innerHTML = `<tr><td colspan="6" style="color:var(--down);">فشل الاتصال. السيرفر يقوم بإعادة تهيئة نفسه.</td></tr>`;
     }
     
     btn.disabled = false;
@@ -396,11 +401,10 @@ async function loadData() {
 }
 
 function forceRefresh() {
-    document.getElementById('matrixBody').innerHTML = '<tr><td colspan="6" class="loading-screen">⏳ يتم جلب أحدث البيانات من السوق...</td></tr>';
+    document.getElementById('matrixBody').innerHTML = '<tr><td colspan="6" class="loading-screen">⏳ يتم جلب البيانات بحزمة واحدة لتجاوز الحظر...</td></tr>';
     loadData();
 }
 
-// تحميل البيانات تلقائياً عند فتح الموقع
 window.onload = loadData;
 </script>
 </body>
